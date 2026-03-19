@@ -1,0 +1,68 @@
+database:
+  path: "data/veripulse.db"
+  echo: false
+
+scraping:
+  interval_minutes: 60
+  max_articles_per_run: 50
+  timeout_seconds: 30
+  retry_attempts: 3
+
+news_sources:
+  newsdata:
+    enabled: true
+    api_key: ""  # Set NEWSDATA_API_KEY in .env
+  newsapi:
+    enabled: false
+    api_key: ""  # Set NEWSAPI_API_KEY in .env
+  rss:
+    enabled: false
+    feeds:
+      - url: "https://www.philstar.com/rss/headlines"
+        category: "general"
+      - url: "https://www.rappler.com/rss/news"
+        category: "general"
+      - url: "https://mb.com.ph/rss"
+        category: "general"
+
+topics:
+  - "Philippines"
+#  - "Philippine Politics"
+#  - "Philippine Economy"
+#  - "Filipino News"
+#  - "Manila"
+
+llm:
+  provider: "ollama"
+  base_url: "http://localhost:11434"
+  model: "deepseek-r1:latest"
+  temperature: 0.3
+  max_tokens: 2048
+  timeout_seconds: 120
+
+embeddings:
+  model: "paraphrase-multilingual-MiniLM-L12-v2"
+  device: "cpu"
+
+social:
+  twitter:
+    enabled: false
+    api_key: ""
+    api_secret: ""
+    access_token: ""
+    access_secret: ""
+  facebook:
+    enabled: true
+    page_access_token: ""
+    page_id: ""
+
+editorial:
+  auto_generate_summary: false
+  require_full_review: true
+  max_article_age_hours: 24
+
+logging:
+  level: "INFO"
+  file: "data/veripulse.log"
+  rotation: "100 MB"
+  retention: "30 days"
