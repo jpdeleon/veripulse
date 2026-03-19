@@ -26,10 +26,10 @@ jobs:
         uses: astral-sh/setup-uv@v4
 
       - name: Install dependencies
-        run: uv pip install -e ".[dev]"
+        run: uv pip install --system -e ".[dev]"
 
       - name: Run tests
-        run: uv run pytest tests/ -v --tb=short
+        run: pytest tests/ -v --tb=short
 
   lint:
     name: Lint
@@ -47,10 +47,10 @@ jobs:
         uses: astral-sh/setup-uv@v4
 
       - name: Install dependencies
-        run: uv pip install -e ".[dev]"
+        run: uv pip install --system -e ".[dev]"
 
       - name: Run ruff
-        run: uv run ruff check .
+        run: ruff check .
 
   typecheck:
     name: Type Check
@@ -68,7 +68,7 @@ jobs:
         uses: astral-sh/setup-uv@v4
 
       - name: Install dependencies
-        run: uv pip install -e ".[dev]"
+        run: uv pip install --system -e ".[dev]"
 
       - name: Run mypy
-        run: uv run mypy veripulse/
+        run: mypy veripulse/
