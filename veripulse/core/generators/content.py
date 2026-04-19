@@ -2,12 +2,72 @@
 
 import json
 import re
+import socket
+import subprocess
+import time
 from typing import Optional
 import httpx
 from loguru import logger
 
 from veripulse.core.config import get_config
 from veripulse.core.database import Article
+
+
+class SSHTunnel:
+    """Forward a remote port to localhost over SSH, respecting ~/.ssh/config (ProxyJump included)."""
+
+    REMOTE_PORT = 11434  # Ollama default
+
+    def __init__(self, host: str):
+        self.host = host
+        self.local_port = self._free_port()
+        self._process: Optional[subprocess.Popen] = None
+
+    def _free_port(self) -> int:
+        with socket.socket() as s:
+            s.bind(("", 0))
+            return s.getsockname()[1]
+
+    def start(self) -> str:
+        """Open the tunnel and return the local base URL."""
+        self._process = subprocess.Popen(
+            [
+                "ssh", "-N",
+                "-L", f"{self.local_port}:localhost:{self.REMOTE_PORT}",
+                "-o", "ExitOnForwardFailure=yes",
+                "-o", "StrictHostKeyChecking=accept-new",
+                "-o", "BatchMode=yes",
+                self.host,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if not self._wait_ready():
+            self.stop()
+            raise RuntimeError(f"SSH tunnel to '{self.host}' did not become ready in time")
+        logger.info(f"SSH tunnel to '{self.host}' open on localhost:{self.local_port}")
+        return f"http://localhost:{self.local_port}"
+
+    def _wait_ready(self, attempts: int = 20, delay: float = 0.5) -> bool:
+        for _ in range(attempts):
+            try:
+                with socket.create_connection(("localhost", self.local_port), timeout=0.5):
+                    return True
+            except OSError:
+                time.sleep(delay)
+        return False
+
+    def stop(self):
+        if self._process:
+            self._process.terminate()
+            try:
+                self._process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self._process.kill()
+            self._process = None
+
+    def __del__(self):
+        self.stop()
 
 
 def extract_json(text: str) -> str | None:
@@ -21,11 +81,27 @@ def extract_json(text: str) -> str | None:
 class LLMClient:
     def __init__(self):
         self.config = get_config()
-        self.base_url = self.config.llm.base_url
+        self._tunnel: Optional[SSHTunnel] = None
+
+        host = self.config.llm.host or ""
+        if host:
+            self._tunnel = SSHTunnel(host)
+            self.base_url = self._tunnel.start()
+        else:
+            self.base_url = self.config.llm.base_url
+
         self.model = self.config.llm.model
         self.temperature = self.config.llm.temperature
         self.max_tokens = self.config.llm.max_tokens
         self.timeout = self.config.llm.timeout_seconds
+
+    def close(self):
+        if self._tunnel:
+            self._tunnel.stop()
+            self._tunnel = None
+
+    def __del__(self):
+        self.close()
 
     async def generate(self, prompt: str, system: Optional[str] = None) -> str:
         messages = []
@@ -80,15 +156,17 @@ class Summarizer:
     def __init__(self, llm: LLMClient):
         self.llm = llm
 
+    _UNUSABLE_CONTENT = {"ONLY AVAILABLE IN PAID PLANS", ""}
+
     async def summarize(self, article: Article, max_length: int = 200) -> str:
-        if not article.content:
+        if not article.content or article.content.strip() in self._UNUSABLE_CONTENT:
             return article.summary or ""
 
         prompt = f"""Summarize the following news article in {max_length} words or less.
 Focus on the key facts and main points.
 
 Title: {article.title}
-Content: {article.content[:3000]}
+Content: {article.content[:3000] if article.content else "No content available"}
 
 Provide a concise summary:"""
 
@@ -96,14 +174,14 @@ Provide a concise summary:"""
         return await self.llm.generate(prompt, system)
 
     async def summarize_bilingual(self, article: Article, max_length: int = 150) -> str:
-        if not article.content:
+        if not article.content or article.content.strip() in self._UNUSABLE_CONTENT:
             return article.summary or ""
 
         prompt = f"""Sumamahin ang sumusunod na article sa {max_length} salita o mas kaunti.
-Mag-focus sa mga pangunahing katotohanan at punto.
+        Mag-focus sa mga pangunahing katotohanan at punto.
 
 Title: {article.title}
-Content: {article.content[:2000]}
+Content: {article.content[:2000] if article.content else "No content available"}
 
 Magbigay ng maikling summary sa Filipino/Tagalog:"""
 
@@ -138,7 +216,7 @@ Include:
 4. Any potential bias to note
 
 Title: {article.title}
-Content: {article.content[:3000]}
+Content: {article.content[:3000] if article.content else "No content available"}
 Category: {article.category}
 Sentiment: {article.sentiment}
 
@@ -184,7 +262,7 @@ Isama ang:
 4. Anumang potential bias na dapat pansinin
 
 Title: {article.title}
-Content: {article.content[:2000]}
+Content: {article.content[:2000] if article.content else "No content available"}
 Category: {article.category}
 Sentiment: {article.sentiment}
 
@@ -300,7 +378,7 @@ Check for:
 4. Bias indicators
 
 Title: {article.title}
-Content: {article.content[:3000]}
+Content: {article.content[:3000] if article.content else "No content available"}
 Source: {article.source.name if article.source else "Unknown"}
 
 Provide a brief analysis as JSON:

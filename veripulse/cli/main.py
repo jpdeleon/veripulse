@@ -2,7 +2,7 @@
 
 import typer
 
-from veripulse.cli import scrape, analyze, generate, review, post, status
+from veripulse.cli import scrape, analyze, generate, review, post, status, db, pipeline
 
 app = typer.Typer(
     name="veripulse",
@@ -16,6 +16,8 @@ app.add_typer(generate.app, name="generate")
 app.add_typer(review.app, name="review")
 app.add_typer(post.app, name="post")
 app.add_typer(status.app, name="status")
+app.add_typer(db.app, name="db")
+app.add_typer(pipeline.app, name="pipeline")
 
 
 @app.command()

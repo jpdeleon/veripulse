@@ -1,9 +1,9 @@
 """Review command - human review and approval workflow."""
 
-from datetime import datetime
 from typing import Optional
 
 import typer
+from datetime import datetime
 from rich.console import Console
 from rich.table import Table
 from rich.prompt import Confirm, Prompt
@@ -32,7 +32,7 @@ def callback(ctx: typer.Context):
         console.print("  [green]edit[/green]    - Edit article field")
         console.print("  [green]bulk[/green]    - Bulk approve/reject\n")
         console.print("Usage: [dim]veripulse review <command> [options][/dim]")
-        raise typer.Exit()
+        raise typer.Exit(1)
 
 
 def get_session() -> Session:

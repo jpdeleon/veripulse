@@ -189,33 +189,231 @@ class NewsDataScraper(BaseScraper):
         return articles
 
 
+BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"macOS"',
+    "Cache-Control": "max-age=0",
+}
+
+
+def _is_js_challenge(resp: httpx.Response) -> bool:
+    """Detect Cloudflare or similar JS challenges."""
+    if resp.status_code in (403, 429, 503):
+        mitigated = resp.headers.get("cf-mitigated", "")
+        server = resp.headers.get("server", "")
+        if mitigated or "cloudflare" in server.lower():
+            return True
+        body = resp.text[:500].lower()
+        if "enable javascript" in body or "just a moment" in body:
+            return True
+    return False
+
+
+async def _fetch_html_playwright(url: str, timeout: int = 30) -> str:
+    """Fetch page HTML using a headless Chromium browser (bypasses JS challenges)."""
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        ctx = await browser.new_context(
+            user_agent=BROWSER_HEADERS["User-Agent"],
+            locale="en-US",
+        )
+        page = await ctx.new_page()
+        await page.goto(url, wait_until="networkidle", timeout=timeout * 1000)
+        html = await page.content()
+        await browser.close()
+        return html
+
+
 class NewspaperScraper:
     def __init__(self):
         self.config = get_config()
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
-    async def scrape_article(self, url: str) -> Optional[ScrapedArticle]:
+    def _parse_html(self, url: str, html: str) -> ScrapedArticle:
         news_config = NewspaperConfig()
         news_config.request_timeout = self.config.scraping.timeout_seconds
+        article = NewsArticle(url, config=news_config)
+        article.set_html(html)
+        article.parse()
+        article.nlp()
+        return ScrapedArticle(
+            title=article.title,
+            url=url,
+            content=article.text,
+            summary=article.summary,
+            author=", ".join(article.authors) if article.authors else None,
+            published_at=article.publish_date,
+            image_url=article.top_image,
+        )
 
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    async def scrape_article(self, url: str) -> Optional[ScrapedArticle]:
         try:
-            article = NewsArticle(url, config=news_config)
-            article.download()
-            article.parse()
-            article.nlp()
+            async with httpx.AsyncClient(
+                headers=BROWSER_HEADERS,
+                follow_redirects=True,
+                timeout=self.config.scraping.timeout_seconds,
+            ) as client:
+                resp = await client.get(url)
 
-            return ScrapedArticle(
-                title=article.title,
-                url=url,
-                content=article.text,
-                summary=article.summary,
-                author=", ".join(article.authors) if article.authors else None,
-                published_at=article.publish_date,
-                image_url=article.top_image,
-            )
+            if _is_js_challenge(resp):
+                logger.info(f"JS challenge detected for {url}, retrying with Playwright")
+                html = await _fetch_html_playwright(url, self.config.scraping.timeout_seconds)
+            else:
+                resp.raise_for_status()
+                html = resp.text
+
+            return self._parse_html(url, html)
+
         except Exception as e:
             logger.error(f"Failed to scrape article {url}: {e}")
             return None
+
+
+class DuckDuckGoNewsScraper(BaseScraper):
+    """Scrapes news via DuckDuckGo News search. Free, no API key, returns direct article URLs."""
+
+    def __init__(self):
+        self.config = get_config()
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    async def fetch_articles(self, **kwargs) -> list[ScrapedArticle]:
+        from ddgs import DDGS
+
+        topic = kwargs.get("topic", "")
+        max_results = kwargs.get("max_results", self.config.scraping.max_articles_per_run)
+        articles = []
+
+        try:
+            with DDGS() as ddgs:
+                results = list(ddgs.news(topic, max_results=max_results))
+
+            for item in results:
+                try:
+                    published = None
+                    if item.get("date"):
+                        from dateutil import parser as dateparser
+                        published = dateparser.parse(item["date"])
+
+                    article = ScrapedArticle(
+                        title=item.get("title", ""),
+                        url=item.get("url", ""),
+                        summary=item.get("body", ""),
+                        image_url=item.get("image"),
+                        published_at=published,
+                        source_name=item.get("source", "DuckDuckGo News"),
+                        source_category=topic,
+                    )
+                    articles.append(article)
+                except Exception as e:
+                    logger.warning(f"Failed to parse DDG news item: {e}")
+                    continue
+
+        except Exception as e:
+            logger.error(f"Failed to fetch DDG news for '{topic}': {e}")
+
+        return articles
+
+    async def fetch_all_topics(self) -> list[ScrapedArticle]:
+        """Fetch articles for all topics defined in config, deduplicating by URL."""
+        topics = self.config.topics if hasattr(self.config, "topics") else []
+        all_articles: list[ScrapedArticle] = []
+        seen_urls: set[str] = set()
+
+        for topic in topics:
+            articles = await self.fetch_articles(topic=topic)
+            for article in articles:
+                if article.url not in seen_urls:
+                    seen_urls.add(article.url)
+                    all_articles.append(article)
+
+        return all_articles
+
+
+class GoogleNewsRSSScraper(BaseScraper):
+    """Scrapes Google News RSS feeds for configured topics. No API key required."""
+
+    BASE_URL = "https://news.google.com/rss/search"
+
+    def __init__(self):
+        self.config = get_config()
+
+    def _build_url(self, topic: str) -> str:
+        import urllib.parse
+        params = urllib.parse.urlencode({"q": topic, "hl": "en", "gl": "PH", "ceid": "PH:en"})
+        return f"{self.BASE_URL}?{params}"
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    async def fetch_articles(self, **kwargs) -> list[ScrapedArticle]:
+        topic = kwargs.get("topic", "")
+        url = self._build_url(topic)
+        articles = []
+
+        try:
+            async with httpx.AsyncClient(timeout=self.config.scraping.timeout_seconds) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+
+            feed = feedparser.parse(response.text)
+
+            for entry in feed.entries[: self.config.scraping.max_articles_per_run]:
+                try:
+                    published = None
+                    if hasattr(entry, "published_parsed") and entry.published_parsed:
+                        published = datetime(*entry.published_parsed[:6])
+
+                    source_name = "Google News"
+                    if hasattr(entry, "source") and isinstance(entry.source, dict):
+                        source_name = entry.source.get("title", "Google News")
+
+                    article = ScrapedArticle(
+                        title=entry.get("title", ""),
+                        url=entry.get("link", ""),
+                        summary=entry.get("summary", ""),
+                        published_at=published,
+                        source_name=source_name,
+                        source_category=topic,
+                    )
+                    articles.append(article)
+                except Exception as e:
+                    logger.warning(f"Failed to parse Google News entry: {e}")
+                    continue
+
+        except Exception as e:
+            logger.error(f"Failed to fetch Google News RSS for '{topic}': {e}")
+
+        return articles
+
+    async def fetch_all_topics(self) -> list[ScrapedArticle]:
+        """Fetch articles for all topics defined in config, deduplicating by URL."""
+        topics = self.config.topics if hasattr(self.config, "topics") else []
+        all_articles: list[ScrapedArticle] = []
+        seen_urls: set[str] = set()
+
+        for topic in topics:
+            articles = await self.fetch_articles(topic=topic)
+            for article in articles:
+                if article.url not in seen_urls:
+                    seen_urls.add(article.url)
+                    all_articles.append(article)
+
+        return all_articles
 
 
 class ScraperFactory:
@@ -223,6 +421,8 @@ class ScraperFactory:
         "rss": RSSScraper,
         "newsapi": NewsAPIScraper,
         "newsdata": NewsDataScraper,
+        "google_news": GoogleNewsRSSScraper,
+        "ddg_news": DuckDuckGoNewsScraper,
     }
 
     @classmethod

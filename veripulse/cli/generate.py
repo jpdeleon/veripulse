@@ -56,6 +56,10 @@ def summary(
     bilingual: bool = typer.Option(False, "--bilingual", help="Generate bilingual summary"),
 ):
     """Generate article summary."""
+    if not article_id and not pending:
+        console.print("[yellow]Provide article_id or use --pending[/yellow]")
+        raise typer.Exit(1)
+
     session = get_session()
 
     try:
@@ -74,14 +78,13 @@ def summary(
                 session.query(Article)
                 .filter(Article.status == ArticleStatus.ANALYZED.value)
                 .filter(Article.content != None)
+                .filter(Article.content != "ONLY AVAILABLE IN PAID PLANS")
+                .filter(Article.content != "")
                 .limit(10)
                 .all()
             )
-        elif article_id:
-            articles = [session.query(Article).filter(Article.id == article_id).first()]
         else:
-            console.print("[yellow]Provide article_id or use --pending[/yellow]")
-            raise typer.Exit(1)
+            articles = [session.query(Article).filter(Article.id == article_id).first()]
 
         articles = [a for a in articles if a]
 
@@ -93,6 +96,8 @@ def summary(
             task = progress.add_task("[cyan]Generating summaries...", total=len(articles))
 
             for article in articles:
+                progress.print(f"[dim][{article.id}][/dim] {article.title[:70]}")
+
                 if bilingual:
                     summary = asyncio.run(summarizer.summarize_bilingual(article))
                 else:
@@ -102,12 +107,11 @@ def summary(
                 article.status = ArticleStatus.GENERATED.value
                 session.commit()
 
-                console.print(f"\n[green]Summary for {article.id}:[/green]")
-                console.print(f"  {summary[:200]}...")
+                progress.print(f"  [green]✓[/green] {summary[:120]}...")
 
                 progress.advance(task)
 
-        console.print(f"\n[cyan]Generated {len(articles)} summaries[/cyan]")
+        console.print(f"\n[green]✓[/green] Generated {len(articles)} summaries")
 
     finally:
         session.close()
@@ -120,6 +124,10 @@ def commentary(
     filipino: bool = typer.Option(False, "--filipino", help="Generate in Filipino"),
 ):
     """Generate insightful commentary."""
+    if not article_id and not pending:
+        console.print("[yellow]Provide article_id or use --pending[/yellow]")
+        raise typer.Exit(1)
+
     session = get_session()
 
     try:
@@ -141,11 +149,8 @@ def commentary(
                 .limit(10)
                 .all()
             )
-        elif article_id:
-            articles = [session.query(Article).filter(Article.id == article_id).first()]
         else:
-            console.print("[yellow]Provide article_id or use --pending[/yellow]")
-            raise typer.Exit(1)
+            articles = [session.query(Article).filter(Article.id == article_id).first()]
 
         articles = [a for a in articles if a]
 
@@ -157,6 +162,8 @@ def commentary(
             task = progress.add_task("[cyan]Generating commentary...", total=len(articles))
 
             for article in articles:
+                progress.print(f"[dim][{article.id}][/dim] {article.title[:70]}")
+
                 if filipino:
                     result = asyncio.run(commentator.generate_commentary_filipino(article))
                 else:
@@ -188,9 +195,15 @@ def commentary(
                 article.status = ArticleStatus.PENDING_REVIEW.value
                 session.commit()
 
+                headline = result.get("headline", "")
+                if headline:
+                    progress.print(f"  [green]✓[/green] {headline[:100]}")
+                else:
+                    progress.print(f"  [green]✓[/green] Commentary generated")
+
                 progress.advance(task)
 
-        console.print(f"\n[cyan]Generated commentary for {len(articles)} articles[/cyan]")
+        console.print(f"\n[green]✓[/green] Generated commentary for {len(articles)} articles")
 
     finally:
         session.close()
@@ -205,6 +218,10 @@ def social(
     pending: bool = typer.Option(False, "--pending", help="Generate for approved articles"),
 ):
     """Generate social media post."""
+    if not article_id and not pending:
+        console.print("[yellow]Provide article_id or use --pending[/yellow]")
+        raise typer.Exit(1)
+
     session = get_session()
 
     try:
@@ -225,11 +242,8 @@ def social(
                 .limit(10)
                 .all()
             )
-        elif article_id:
-            articles = [session.query(Article).filter(Article.id == article_id).first()]
         else:
-            console.print("[yellow]Provide article_id or use --pending[/yellow]")
-            raise typer.Exit(1)
+            articles = [session.query(Article).filter(Article.id == article_id).first()]
 
         articles = [a for a in articles if a]
 
@@ -243,6 +257,8 @@ def social(
         table.add_column("Post", style="white", max_width=60)
 
         for article in articles:
+            console.print(f"[dim][{article.id}][/dim] {article.title[:70]}")
+
             commentary = (
                 session.query(Commentary).filter(Commentary.article_id == article.id).first()
             )
@@ -263,8 +279,7 @@ def social(
                 post[:58] + "..." if len(post) > 58 else post,
             )
 
-            console.print(f"\n[green]Generated post for article {article.id}:[/green]")
-            console.print(f"[dim]{post}[/dim]\n")
+            console.print(f"  [green]✓[/green] [dim]{post}[/dim]\n")
 
         console.print(table)
 

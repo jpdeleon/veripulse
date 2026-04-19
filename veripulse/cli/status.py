@@ -1,19 +1,18 @@
 """Status command - system status and monitoring."""
 
+from datetime import datetime
+from typing import Optional
+
 import typer
-import click
-from datetime import datetime, timedelta
 from rich.console import Console
-from rich.table import Table
 from rich.panel import Panel
-from sqlalchemy import func
+from rich.table import Table
 from sqlalchemy.orm import Session
 
-from veripulse.core.config import get_config
-from veripulse.core.database import init_db, Article, SocialPost, ArticleStatus
-from veripulse.core.generators.content import LLMClient
+import httpx
 
-STATUS_CHOICES = [s.value for s in ArticleStatus]
+from veripulse.core.config import get_config
+from veripulse.core.database import init_db, Article, ArticleStatus, SocialPost
 
 app = typer.Typer(
     name="status",
@@ -21,6 +20,8 @@ app = typer.Typer(
     invoke_without_command=True,
 )
 console = Console()
+
+STATUS_CHOICES = [s.value for s in ArticleStatus]
 
 
 @app.callback()
@@ -30,10 +31,10 @@ def callback(ctx: typer.Context):
         console.print("[bold cyan]Veripulse Status Commands:[/bold cyan]\n")
         console.print("  [green]main[/green]      - Show overall system status")
         console.print("  [green]articles[/green]  - List recent articles")
-        console.print("  [green]queue[/green]    - Show pending work queue")
-        console.print("  [green]top[/green]      - Show top articles by importance\n")
+        console.print("  [green]queue[/green]     - Show pending work queue")
+        console.print("  [green]top[/green]       - Show top articles by importance\n")
         console.print("Usage: [dim]veripulse status <command> [options][/dim]")
-        raise typer.Exit()
+        raise typer.Exit(1)
 
 
 def get_session() -> Session:
@@ -60,10 +61,10 @@ def main():
         total_articles = session.query(Article).count()
         total_posts = session.query(SocialPost).count()
 
-        status_counts = {}
-        for status in ArticleStatus:
-            count = session.query(Article).filter(Article.status == status.value).count()
-            status_counts[status.value] = count
+        status_counts = {
+            s.value: session.query(Article).filter(Article.status == s.value).count()
+            for s in ArticleStatus
+        }
 
         scheduled = session.query(SocialPost).filter(SocialPost.status == "scheduled").count()
         posted = session.query(SocialPost).filter(SocialPost.status == "posted").count()
@@ -78,7 +79,6 @@ def main():
         console.print(f"  posted: {posted}")
 
         recent = session.query(Article).order_by(Article.created_at.desc()).limit(5).all()
-
         if recent:
             console.print("\n[bold]Recent Articles:[/bold]")
             for article in recent:
@@ -86,12 +86,22 @@ def main():
                 age_str = f"{age.seconds // 60}m ago" if age.days == 0 else f"{age.days}d ago"
                 console.print(f"  [{article.id}] {article.title[:50]}... [{age_str}]")
 
-        llm = LLMClient()
-        if llm.check_connection():
-            console.print(f"\n[green]✓[/green] Ollama: Connected ({llm.model})")
+        config = get_config()
+        llm_cfg = config.llm
+        if llm_cfg.host:
+            console.print(f"\n[cyan]~[/cyan] Ollama: Remote via SSH ({llm_cfg.host}) — model: {llm_cfg.model}")
+            console.print("  [dim]Run: veripulse generate check  (opens tunnel to verify)[/dim]")
         else:
-            console.print(f"\n[red]✗[/red] Ollama: Not connected")
-            console.print("  Run: ollama serve")
+            import httpx
+            try:
+                resp = httpx.get(f"{llm_cfg.base_url}/api/tags", timeout=3)
+                if resp.status_code == 200:
+                    console.print(f"\n[green]✓[/green] Ollama: Connected at {llm_cfg.base_url} ({llm_cfg.model})")
+                else:
+                    console.print(f"\n[red]✗[/red] Ollama: Unexpected response ({resp.status_code})")
+            except Exception:
+                console.print(f"\n[red]✗[/red] Ollama: Not reachable at {llm_cfg.base_url}")
+                console.print("  [dim]Run: ollama serve[/dim]")
 
     finally:
         session.close()
@@ -100,26 +110,26 @@ def main():
 @app.command()
 def articles(
     limit: int = typer.Option(10, "--limit", "-l", help="Number to show"),
-    status: str = typer.Option(
-        None,
-        "--status",
-        "-s",
-        help="Filter by status",
-        click_type=click.Choice(STATUS_CHOICES, case_sensitive=False),
+    status: Optional[str] = typer.Option(
+        None, "--status", "-s",
+        help=f"Filter by status ({', '.join(STATUS_CHOICES)})",
     ),
 ):
     """List recent articles."""
     session = get_session()
 
     try:
-        query = session.query(Article).order_by(Article.created_at.desc())
+        if status and status not in STATUS_CHOICES:
+            console.print(f"[red]Unknown status '{status}'. Valid: {', '.join(STATUS_CHOICES)}[/red]")
+            raise typer.Exit(1)
 
+        query = session.query(Article).order_by(Article.created_at.desc())
         if status:
             query = query.filter(Article.status == status)
 
-        articles = query.limit(limit).all()
+        results = query.limit(limit).all()
 
-        if not articles:
+        if not results:
             console.print("[yellow]No articles found[/yellow]")
             return
 
@@ -128,13 +138,16 @@ def articles(
         table.add_column("Title", style="white", max_width=50)
         table.add_column("Status", style="yellow")
         table.add_column("Category", style="magenta")
+        table.add_column("Published", style="dim")
 
-        for article in articles:
+        for article in results:
+            pub = article.published_at.strftime("%Y-%m-%d") if article.published_at else "—"
             table.add_row(
                 str(article.id),
                 article.title[:47] + "..." if len(article.title) > 47 else article.title,
                 article.status,
-                article.category or "N/A",
+                article.category or "—",
+                pub,
             )
 
         console.print(table)
@@ -149,18 +162,30 @@ def queue():
     session = get_session()
 
     try:
-        raw_count = session.query(Article).filter(Article.status == ArticleStatus.RAW.value).count()
-        analyzed_count = (
-            session.query(Article).filter(Article.status == ArticleStatus.ANALYZED.value).count()
+        raw = session.query(Article).filter(Article.status == ArticleStatus.RAW.value).count()
+        analyzed = session.query(Article).filter(Article.status == ArticleStatus.ANALYZED.value).count()
+        pending = session.query(Article).filter(Article.status == ArticleStatus.PENDING_REVIEW.value).count()
+        approved = session.query(Article).filter(Article.status == ArticleStatus.APPROVED.value).count()
+
+        console.print(
+            Panel.fit(
+                "[bold]Work Queue[/bold]\n\n"
+                f"Raw (needs analysis):     [cyan]{raw}[/cyan]\n"
+                f"Analyzed (needs gen):     [yellow]{analyzed}[/yellow]\n"
+                f"Pending review:           [magenta]{pending}[/magenta]\n"
+                f"Approved (ready to post): [green]{approved}[/green]",
+                border_style="cyan",
+            )
         )
-        pending_review = (
-            session.query(Article)
-            .filter(Article.status == ArticleStatus.PENDING_REVIEW.value)
-            .count()
-        )
-        approved = (
-            session.query(Article).filter(Article.status == ArticleStatus.APPROVED.value).count()
-        )
+
+        if raw:
+            console.print("[dim]  → veripulse analyze all[/dim]")
+        if analyzed:
+            console.print("[dim]  → veripulse generate summary --pending[/dim]")
+        if pending:
+            console.print("[dim]  → veripulse review list[/dim]")
+        if approved:
+            console.print("[dim]  → veripulse post bulk facebook[/dim]")
 
         scheduled_posts = (
             session.query(SocialPost)
@@ -170,28 +195,13 @@ def queue():
             .all()
         )
 
-        console.print(
-            Panel.fit(
-                "[bold]Work Queue[/bold]\n\n"
-                f"Raw articles: [cyan]{raw_count}[/cyan]\n"
-                f"Need analysis: [yellow]{analyzed_count}[/yellow]\n"
-                f"Pending review: [magenta]{pending_review}[/magenta]\n"
-                f"Approved: [green]{approved}[/green]",
-                border_style="cyan",
-            )
-        )
-
         if scheduled_posts:
             console.print("\n[bold]Upcoming Posts:[/bold]")
             for post in scheduled_posts:
                 article = session.query(Article).filter(Article.id == post.article_id).first()
-                console.print(
-                    f"  {post.scheduled_at.strftime('%H:%M')} - "
-                    f"{post.platform} - "
-                    f"{article.title[:40]}..."
-                    if article
-                    else "Unknown"
-                )
+                title = article.title[:40] if article else "Unknown"
+                time_str = post.scheduled_at.strftime("%H:%M") if post.scheduled_at else "?"
+                console.print(f"  {time_str} [{post.platform}] {title}")
 
     finally:
         session.close()
@@ -201,11 +211,11 @@ def queue():
 def top(
     limit: int = typer.Option(10, "--limit", "-l", help="Number to show"),
 ):
-    """Show top articles by importance."""
+    """Show top articles by importance score."""
     session = get_session()
 
     try:
-        articles = (
+        results = (
             session.query(Article)
             .filter(Article.status != ArticleStatus.RAW.value)
             .order_by(Article.importance_score.desc())
@@ -213,23 +223,25 @@ def top(
             .all()
         )
 
-        if not articles:
-            console.print("[yellow]No ranked articles[/yellow]")
+        if not results:
+            console.print("[yellow]No ranked articles found[/yellow]")
             return
 
         table = Table(title="Top Articles by Importance")
         table.add_column("Rank", style="cyan", width=4)
-        table.add_column("Title", style="white", max_width=45)
-        table.add_column("Importance", style="green")
+        table.add_column("Title", style="white", max_width=48)
+        table.add_column("Score", style="green", width=12)
         table.add_column("Category", style="magenta")
+        table.add_column("Status", style="yellow")
 
-        for i, article in enumerate(articles, 1):
+        for i, article in enumerate(results, 1):
             bar = "█" * int(article.importance_score * 10)
             table.add_row(
                 str(i),
-                article.title[:42] + "..." if len(article.title) > 42 else article.title,
+                article.title[:45] + "..." if len(article.title) > 45 else article.title,
                 f"{article.importance_score:.2f} {bar}",
-                article.category or "N/A",
+                article.category or "—",
+                article.status,
             )
 
         console.print(table)

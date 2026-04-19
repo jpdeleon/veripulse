@@ -70,6 +70,7 @@ def all(
             task = progress.add_task("[cyan]Analyzing articles...", total=len(articles))
 
             for article in articles:
+                progress.print(f"[dim][{article.id}][/dim] {article.title[:70]}")
                 all_articles = session.query(Article).all()
 
                 article.category = categorizer.categorize(article)
@@ -85,10 +86,14 @@ def all(
 
                 article.status = ArticleStatus.ANALYZED.value
 
+                progress.print(
+                    f"  [green]✓[/green] {article.category or '—'} | "
+                    f"{article.sentiment or '—'} | importance: {article.importance_score:.2f}"
+                )
                 progress.advance(task)
 
         session.commit()
-        console.print(f"[green]Analyzed {len(articles)} articles[/green]")
+        console.print(f"[green]✓[/green] Analyzed {len(articles)} articles")
 
     finally:
         session.close()
@@ -125,11 +130,11 @@ def single(
 
         session.commit()
 
-        console.print(f"[green]Analyzed article {article_id}:[/green]")
-        console.print(f"  Category: {article.category}")
-        console.print(f"  Sentiment: {article.sentiment} ({article.sentiment_score})")
+        console.print(f"[green]✓[/green] Analyzed article {article_id}")
+        console.print(f"  Category:   {article.category or '—'}")
+        console.print(f"  Sentiment:  {article.sentiment or '—'} ({article.sentiment_score:.2f})")
         console.print(f"  Importance: {article.importance_score:.2f}")
-        console.print(f"  Trending: {article.trending_score:.2f}")
+        console.print(f"  Trending:   {article.trending_score:.2f}")
 
     finally:
         session.close()

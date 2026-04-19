@@ -42,7 +42,8 @@ class ScrapingConfig(BaseModel):
 class LLMConfig(BaseModel):
     provider: str = "ollama"
     base_url: str = "http://localhost:11434"
-    model: str = "llama3.2:3b"
+    host: str = ""  # SSH hostname from ~/.ssh/config; tunnels Ollama over SSH when set
+    model: str = "qwen3.5:latest"
     temperature: float = 0.3
     max_tokens: int = 2048
     timeout_seconds: int = 120
@@ -135,6 +136,9 @@ class Config(BaseSettings):
         )
         data["llm"]["model"] = os.environ.get(
             "OLLAMA_MODEL", data["llm"].get("model", "llama3.2:3b")
+        )
+        data["llm"]["host"] = os.environ.get(
+            "OLLAMA_SSH_HOST", data["llm"].get("host", "")
         )
 
         if "social" not in data:

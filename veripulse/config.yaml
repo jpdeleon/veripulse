@@ -9,8 +9,12 @@ scraping:
   retry_attempts: 3
 
 news_sources:
+  ddg_news:
+    enabled: true   # Free, no API key, returns direct article URLs — uses topics list below
+  google_news:
+    enabled: false  # Free RSS fallback; URLs are Google proxies requiring extra resolution
   newsdata:
-    enabled: true
+    enabled: false
     api_key: ""  # Set NEWSDATA_API_KEY in .env
   newsapi:
     enabled: false
@@ -26,16 +30,21 @@ news_sources:
         category: "general"
 
 topics:
-  - "Philippines"
-#  - "Philippine Politics"
-#  - "Philippine Economy"
-#  - "Filipino News"
-#  - "Manila"
+  - "Education"
+  - "Internship"
+  - "Scholarship"
+  - "Science"
+  - "Education Philippines"
+  - "Scholarship Philippines"
+  - "CHED scholarship"
+  - "DepEd programs"
+  - "Filipino students"
 
 llm:
   provider: "ollama"
   base_url: "http://localhost:11434"
-  model: "deepseek-r1:latest"
+  host: ""  # Set OLLAMA_SSH_HOST in .env to tunnel over SSH (ProxyJump supported)
+  model: "qwen3.5:latest"
   temperature: 0.3
   max_tokens: 2048
   timeout_seconds: 120
@@ -47,14 +56,14 @@ embeddings:
 social:
   twitter:
     enabled: false
-    api_key: ""
-    api_secret: ""
-    access_token: ""
-    access_secret: ""
+    api_key: ""       # Set TWITTER_API_KEY in .env
+    api_secret: ""    # Set TWITTER_API_SECRET in .env
+    access_token: ""  # Set TWITTER_ACCESS_TOKEN in .env
+    access_secret: "" # Set TWITTER_ACCESS_SECRET in .env
   facebook:
     enabled: true
-    page_access_token: ""
-    page_id: ""
+    page_access_token: ""  # Set FACEBOOK_PAGE_ACCESS_TOKEN in .env
+    page_id: ""            # Set FACEBOOK_PAGE_ID in .env
 
 editorial:
   auto_generate_summary: false

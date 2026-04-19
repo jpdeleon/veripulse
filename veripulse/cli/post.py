@@ -15,6 +15,51 @@ from veripulse.core.database import init_db, Article, SocialPost, ArticleStatus
 from veripulse.core.publishers.social import PublisherFactory
 from veripulse.core.generators.content import LLMClient, SocialPostGenerator
 
+
+def _get_post_content(session: Session, article: Article, platform: str) -> str:
+    """Return post content without calling the LLM when content already exists.
+
+    Priority:
+    1. Existing SocialPost draft/scheduled for this article+platform
+    2. Commentary or summary + URL (no LLM needed)
+    3. LLM generation as last resort
+    """
+    existing = (
+        session.query(SocialPost)
+        .filter(SocialPost.article_id == article.id)
+        .filter(SocialPost.platform == platform)
+        .filter(SocialPost.status.in_(["draft", "scheduled"]))
+        .order_by(SocialPost.id.desc())
+        .first()
+    )
+    if existing and existing.content:
+        return existing.content
+
+    commentary = article.commentary.commentary_text if article.commentary else ""
+    summary = article.summary or commentary or article.title
+    url = article.url or ""
+
+    if platform == "twitter":
+        base = summary[:230] if summary else article.title
+        return f"{base}\n\n{url}" if url else base
+    elif platform == "facebook":
+        body = commentary or summary
+        return f"{body}\n\n🔗 {url}" if url else body
+
+    return summary
+
+
+def _llm_generate(session: Session, article: Article, platform: str) -> str:
+    """Generate content via LLM — only called when no existing content is available."""
+    llm = LLMClient()
+    generator = SocialPostGenerator(llm)
+    commentary = article.commentary.commentary_text if article.commentary else ""
+    if platform == "twitter":
+        return asyncio.run(generator.generate_tweet(article, commentary))
+    elif platform == "facebook":
+        return asyncio.run(generator.generate_facebook_post(article, commentary))
+    return article.summary or article.title
+
 app = typer.Typer(
     name="post",
     help="Post and schedule social media content",
@@ -66,26 +111,9 @@ def schedule(
 
         scheduled_at = datetime.utcnow() + timedelta(minutes=minutes_from_now)
 
-        llm = LLMClient()
-        generator = SocialPostGenerator(llm)
-
-        if platform == "twitter":
-            commentary = None
-            comment_obj = (
-                session.query(SocialPost).filter(SocialPost.article_id == article_id).first()
-            )
-            if comment_obj:
-                commentary = comment_obj.content
-
-            if not commentary:
-                commentary = article.commentary.commentary_text if article.commentary else ""
-
-            content = asyncio.run(generator.generate_tweet(article, commentary))
-        elif platform == "facebook":
-            commentary = article.commentary.commentary_text if article.commentary else ""
-            content = asyncio.run(generator.generate_facebook_post(article, commentary))
-        else:
-            content = article.summary or article.title
+        content = _get_post_content(session, article, platform)
+        if not content:
+            content = _llm_generate(session, article, platform)
 
         post = SocialPost(
             article_id=article_id,
@@ -130,18 +158,9 @@ def now(
             console.print(f"[red]Publisher not available: {platform}[/red]")
             raise typer.Exit(1)
 
-        commentary = article.commentary.commentary_text if article.commentary else ""
-
-        if platform == "twitter":
-            llm = LLMClient()
-            generator = SocialPostGenerator(llm)
-            content = asyncio.run(generator.generate_tweet(article, commentary))
-        elif platform == "facebook":
-            llm = LLMClient()
-            generator = SocialPostGenerator(llm)
-            content = asyncio.run(generator.generate_facebook_post(article, commentary))
-        else:
-            content = article.summary or article.title
+        content = _get_post_content(session, article, platform)
+        if not content:
+            content = _llm_generate(session, article, platform)
 
         with console.status(f"[bold green]Posting to {platform}..."):
             result = asyncio.run(publisher.post(content, article))
@@ -293,16 +312,9 @@ def bulk(
                 if existing:
                     continue
 
-                llm = LLMClient()
-                generator = SocialPostGenerator(llm)
-                commentary = article.commentary.commentary_text if article.commentary else ""
-
-                if plat == "twitter":
-                    content = asyncio.run(generator.generate_tweet(article, commentary))
-                elif plat == "facebook":
-                    content = asyncio.run(generator.generate_facebook_post(article, commentary))
-                else:
-                    content = article.summary or article.title
+                content = _get_post_content(session, article, plat)
+                if not content:
+                    content = _llm_generate(session, article, plat)
 
                 post = SocialPost(
                     article_id=article.id,
