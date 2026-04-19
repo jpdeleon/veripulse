@@ -332,9 +332,27 @@ def bulk(
             console.print("[yellow]No articles match criteria[/yellow]")
             return
 
-        console.print(f"Found {len(articles)} articles to {action}")
+        console.print(f"Found {len(articles)} articles to {action}\n")
 
-        if not Confirm.ask(f"Proceed with bulk {action}?"):
+        table = Table(title=f"Articles to {action}")
+        table.add_column("ID", style="cyan", width=4)
+        table.add_column("Title", style="white", max_width=52)
+        table.add_column("Category", style="magenta")
+        table.add_column("Score", style="green", width=6)
+        table.add_column("Source", style="dim", max_width=24)
+        table.add_column("Published", style="dim", width=12)
+        for a in articles:
+            table.add_row(
+                str(a.id),
+                a.title[:50] + "..." if len(a.title) > 50 else a.title,
+                a.category or "—",
+                f"{a.importance_score:.2f}",
+                a.source.name if a.source else "—",
+                a.published_at.strftime("%Y-%m-%d") if a.published_at else "—",
+            )
+        console.print(table)
+
+        if not Confirm.ask(f"\nProceed with bulk {action}?"):
             console.print("[yellow]Cancelled[/yellow]")
             return
 

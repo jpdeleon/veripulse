@@ -153,6 +153,7 @@ def _run_enrich(session, limit: int = 20, min_content_length: int = 100):
 
     enriched = 0
     failed = 0
+    import time
 
     with Progress() as progress:
         task = progress.add_task("[cyan]Fetching full content...", total=len(articles))
@@ -172,6 +173,7 @@ def _run_enrich(session, limit: int = 20, min_content_length: int = 100):
                 progress.print(f"  [yellow]✗[/yellow] No content retrieved")
                 failed += 1
             progress.advance(task)
+            time.sleep(1.5)  # rate-limit: avoid 429 from Yahoo and similar sources
 
     console.print(f"[green]Enriched:[/green] {enriched} articles")
     if failed:

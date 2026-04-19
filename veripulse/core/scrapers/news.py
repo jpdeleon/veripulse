@@ -236,20 +236,38 @@ def _is_challenge_page(html: str) -> bool:
 async def _fetch_html_playwright(url: str, timeout: int = 30) -> Optional[str]:
     """Fetch page HTML using a headless Chromium browser (bypasses JS challenges).
 
+    Uses anti-detection measures to reduce Cloudflare fingerprinting.
     Returns None if the challenge page could not be bypassed.
     """
     from playwright.async_api import async_playwright
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        browser = await p.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+            ],
+        )
         ctx = await browser.new_context(
             user_agent=BROWSER_HEADERS["User-Agent"],
             locale="en-US",
+            viewport={"width": 1280, "height": 800},
+            java_script_enabled=True,
+            extra_http_headers={
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept": BROWSER_HEADERS["Accept"],
+            },
+        )
+        # hide navigator.webdriver to avoid bot detection
+        await ctx.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
         )
         page = await ctx.new_page()
         await page.goto(url, wait_until="load", timeout=timeout * 1000)
-        # wait up to 8s for challenge to resolve
-        for _ in range(4):
+        # poll up to 12s for challenge to resolve
+        for _ in range(6):
             await page.wait_for_timeout(2000)
             html = await page.content()
             if not _is_challenge_page(html):
@@ -265,6 +283,7 @@ class NewspaperScraper:
         self.config = get_config()
 
     def _parse_html(self, url: str, html: str) -> ScrapedArticle:
+        html = html.replace('\x00', '')  # strip NULL bytes that break newspaper3k's XML parser
         news_config = NewspaperConfig()
         news_config.request_timeout = self.config.scraping.timeout_seconds
         article = NewsArticle(url, config=news_config)
