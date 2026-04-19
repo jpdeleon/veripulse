@@ -178,6 +178,7 @@ def mock_config():
         "newsapi": {"api_key": "test-key"},
     }
     mock_cfg.llm.base_url = "http://localhost:11434"
+    mock_cfg.llm.host = ""  # prevent SSHTunnel from being constructed in tests
     mock_cfg.llm.model = "llama3.2:3b"
     mock_cfg.llm.temperature = 0.3
     mock_cfg.social.twitter.enabled = False

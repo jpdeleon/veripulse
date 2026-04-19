@@ -56,7 +56,7 @@ class TestLLMConfig:
         config = LLMConfig()
         assert config.provider == "ollama"
         assert config.base_url == "http://localhost:11434"
-        assert config.model == "llama3.2:3b"
+        assert config.model == "qwen3.5:latest"
         assert config.temperature == 0.3
         assert config.max_tokens == 2048
         assert config.timeout_seconds == 120
