@@ -1,5 +1,7 @@
 """Analyze command - categorize, sentiment, importance scoring."""
 
+from typing import Optional
+
 import typer
 from rich.console import Console
 from rich.progress import Progress
@@ -40,6 +42,32 @@ def get_session() -> Session:
     config = get_config()
     _, SessionLocal = init_db(config.database.path)
     return SessionLocal()
+
+
+def _article_hint(session: Session, statuses: list, limit: int = 10) -> None:
+    """Print a compact article table to help the user pick an ID."""
+    articles = (
+        session.query(Article)
+        .filter(Article.status.in_(statuses))
+        .order_by(Article.importance_score.desc())
+        .limit(limit)
+        .all()
+    )
+    if not articles:
+        return
+    table = Table(title=f"Available articles  [{', '.join(statuses)}]")
+    table.add_column("ID", style="cyan", width=4)
+    table.add_column("Title", style="white", max_width=52)
+    table.add_column("Category", style="magenta")
+    table.add_column("Score", style="green", width=6)
+    for a in articles:
+        table.add_row(
+            str(a.id),
+            a.title[:50] + "..." if len(a.title) > 50 else a.title,
+            a.category or "—",
+            f"{a.importance_score:.2f}",
+        )
+    console.print(table)
 
 
 @app.command()
@@ -101,16 +129,22 @@ def all(
 
 @app.command()
 def single(
-    article_id: int = typer.Argument(..., help="Article ID to analyze"),
+    article_id: Optional[int] = typer.Argument(None, help="Article ID to analyze"),
 ):
     """Analyze a single article."""
     session = get_session()
+
+    if article_id is None:
+        _article_hint(session, [ArticleStatus.RAW.value])
+        session.close()
+        raise typer.Exit(1)
 
     try:
         article = session.query(Article).filter(Article.id == article_id).first()
 
         if not article:
             console.print(f"[red]Article {article_id} not found[/red]")
+            _article_hint(session, [ArticleStatus.RAW.value])
             raise typer.Exit(1)
 
         categorizer = Categorizer()

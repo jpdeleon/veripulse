@@ -224,8 +224,20 @@ def _is_js_challenge(resp: httpx.Response) -> bool:
     return False
 
 
-async def _fetch_html_playwright(url: str, timeout: int = 30) -> str:
-    """Fetch page HTML using a headless Chromium browser (bypasses JS challenges)."""
+_CHALLENGE_TITLES = {"just a moment", "attention required", "access denied", "security check"}
+
+
+def _is_challenge_page(html: str) -> bool:
+    """Return True if Playwright captured a JS challenge page instead of real content."""
+    lower = html[:2000].lower()
+    return any(t in lower for t in _CHALLENGE_TITLES)
+
+
+async def _fetch_html_playwright(url: str, timeout: int = 30) -> Optional[str]:
+    """Fetch page HTML using a headless Chromium browser (bypasses JS challenges).
+
+    Returns None if the challenge page could not be bypassed.
+    """
     from playwright.async_api import async_playwright
 
     async with async_playwright() as p:
@@ -235,10 +247,17 @@ async def _fetch_html_playwright(url: str, timeout: int = 30) -> str:
             locale="en-US",
         )
         page = await ctx.new_page()
-        await page.goto(url, wait_until="networkidle", timeout=timeout * 1000)
-        html = await page.content()
+        await page.goto(url, wait_until="load", timeout=timeout * 1000)
+        # wait up to 8s for challenge to resolve
+        for _ in range(4):
+            await page.wait_for_timeout(2000)
+            html = await page.content()
+            if not _is_challenge_page(html):
+                await browser.close()
+                return html
         await browser.close()
-        return html
+        logger.warning(f"Cloudflare challenge not bypassed for {url}")
+        return None
 
 
 class NewspaperScraper:
@@ -275,6 +294,9 @@ class NewspaperScraper:
             if _is_js_challenge(resp):
                 logger.info(f"JS challenge detected for {url}, retrying with Playwright")
                 html = await _fetch_html_playwright(url, self.config.scraping.timeout_seconds)
+                if html is None:
+                    logger.warning(f"Cloudflare challenge not bypassed for {url}")
+                    return None
             else:
                 resp.raise_for_status()
                 html = resp.text

@@ -237,7 +237,7 @@ veripulse scrape rss <url>                  # Scrape a specific RSS feed
 veripulse scrape sources                    # List configured sources
 ```
 
-Scraping automatically retries with headless Chromium when a site returns a Cloudflare JS challenge.
+Scraping automatically retries with headless Chromium when a site returns a Cloudflare JS challenge. The browser waits up to 8 seconds (polling every 2 s) for the challenge to clear. If it does not clear, the article is skipped rather than saving the challenge page.
 
 ### `veripulse analyze`
 
@@ -268,14 +268,32 @@ veripulse generate social <id> twitter
 veripulse generate check                              # Ping Ollama
 ```
 
+When called without an article ID or `--pending`, a table of available articles is printed for easy reference. Ollama is contacted **only after** confirming there are articles to process — running `--pending` with no eligible articles never opens the SSH tunnel.
+
+If `--pending` finds no articles because they lack scraped content, the reason is shown:
+```
+2 analyzed article(s) skipped — no scraped content.
+Run `veripulse scrape enrich` to fetch missing content.
+```
+
 ### `veripulse pipeline`
 
 ```bash
 veripulse pipeline run                      # Process all pending articles
 veripulse pipeline run <id>                 # By article ID
-veripulse pipeline run <url>                # By article URL
+veripulse pipeline run <url>                # By article URL (auto-scrapes if not in DB)
 veripulse pipeline run --limit 10
 veripulse pipeline run <id> --bilingual --filipino
+```
+
+**Auto-scrape on URL input** — if the URL is not yet in the database, the pipeline scrapes it automatically (with Playwright fallback for Cloudflare-protected sites) before running analyze → summary → commentary.
+
+**Lazy LLM connection** — Ollama / SSH tunnel is opened only when a generation step actually needs to run. Passing a URL that is already fully processed never opens the tunnel.
+
+If articles exist but lack scraped content, the pipeline reports the count and suggests `scrape enrich`:
+```
+1 article(s) skipped — no scraped content.
+Run `veripulse scrape enrich` to fetch missing content.
 ```
 
 ### `veripulse review`
@@ -293,6 +311,8 @@ veripulse review bulk approve                               # Bulk approve
 veripulse review bulk approve --min 0.7 --category education
 veripulse review bulk reject
 ```
+
+All `review` commands that take an article ID (`show`, `approve`, `reject`, `edit`) are **ID-optional**: omitting the ID prints a table of `pending_review` articles. If none exist yet, a table of `generated` articles is shown with a hint to run `generate commentary --pending`.
 
 ### `veripulse post`
 
@@ -324,12 +344,15 @@ veripulse status top --limit 20
 
 ```bash
 veripulse db stats                                      # Record counts by status
-veripulse db delete --id 42
+veripulse db delete --id 42                             # Delete one article
+veripulse db delete --id 42 --id 43 --id 44            # Delete multiple articles by ID
 veripulse db delete --status rejected
 veripulse db delete --source "DuckDuckGo News" --no-content
 veripulse db delete --before 2025-01-01 --dry-run       # Preview without deleting
 veripulse db delete --status raw --no-content -y        # Skip confirmation
 ```
+
+Running `veripulse db delete` with no filters prints a table of all articles (ID, status, title, score) so you can pick the right ID before deleting.
 
 ---
 
@@ -485,7 +508,7 @@ veripulse scrape enrich                       # batch enrichment
 veripulse scrape article --full <url>         # single URL
 ```
 
-Sites behind Cloudflare are automatically retried with Playwright. If a site remains unreachable it cannot be enriched without authentication.
+Sites behind Cloudflare are automatically retried with Playwright. The browser polls every 2 seconds (up to 8 s total) for the JS challenge to clear. If it does not clear, the article is skipped and a warning is logged — no garbage content is saved. Sites that require authentication cannot be enriched.
 
 ### Facebook token invalid or expired
 
@@ -516,6 +539,9 @@ sqlite3 data/veripulse.db "PRAGMA integrity_check;"
 | `403 Forbidden` | Site blocks scrapers | Playwright fallback runs automatically |
 | `SSH tunnel did not become ready` | Host unreachable | Check `OLLAMA_SSH_HOST` and `~/.ssh/config` |
 | `UNIQUE constraint failed` | Duplicate URL | Normal — article already in DB |
+| `Cloudflare challenge not bypassed` | Hard bot protection | Site cannot be scraped automatically |
+| `N article(s) skipped — no scraped content` | Missing body text | Run `veripulse scrape enrich` |
+| `Just a moment...` as article title | Challenge page saved before fix | Delete with `veripulse db delete --id <id> -y` |
 
 ---
 

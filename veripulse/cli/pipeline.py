@@ -12,6 +12,8 @@ from veripulse.core.config import get_config
 from veripulse.core.database import init_db, Article, ArticleStatus, Commentary
 from veripulse.core.analyzers.nlp import Categorizer, SentimentAnalyzer, ImportanceScorer, TrendingDetector
 from veripulse.core.generators.content import LLMClient, Summarizer, Commentator
+from veripulse.core.scrapers.news import NewspaperScraper
+from veripulse.cli.scrape import save_single_article
 
 app = typer.Typer(
     name="pipeline",
@@ -37,6 +39,33 @@ def get_session() -> Session:
     return SessionLocal()
 
 
+def _article_hint(session: Session, statuses: list, limit: int = 10) -> None:
+    """Print a compact article table to help the user pick an ID."""
+    from rich.table import Table as RichTable
+    articles = (
+        session.query(Article)
+        .filter(Article.status.in_(statuses))
+        .order_by(Article.importance_score.desc())
+        .limit(limit)
+        .all()
+    )
+    if not articles:
+        return
+    table = RichTable(title=f"Available articles  [{', '.join(statuses)}]")
+    table.add_column("ID", style="cyan", width=4)
+    table.add_column("Title", style="white", max_width=52)
+    table.add_column("Category", style="magenta")
+    table.add_column("Score", style="green", width=6)
+    for a in articles:
+        table.add_row(
+            str(a.id),
+            a.title[:50] + "..." if len(a.title) > 50 else a.title,
+            a.category or "—",
+            f"{a.importance_score:.2f}",
+        )
+    console.print(table)
+
+
 def _step(label: str):
     console.print(f"\n[bold cyan]▶ {label}[/bold cyan]")
 
@@ -53,7 +82,17 @@ def _fail(msg: str):
     console.print(f"  [red]✗[/red] {msg}")
 
 
-def _run_article(session: Session, article: Article, llm: LLMClient, bilingual: bool, filipino: bool) -> bool:
+def _get_llm() -> Optional[LLMClient]:
+    """Lazily create and verify LLM connection. Returns None on failure."""
+    llm = LLMClient()
+    if not llm.check_connection():
+        console.print("[red]Cannot connect to Ollama.[/red]")
+        console.print(f"[dim]Expected at: {llm.base_url}  Model: {llm.model}[/dim]")
+        return None
+    return llm
+
+
+def _run_article(session: Session, article: Article, bilingual: bool, filipino: bool) -> bool:
     """Run analyze → summary → commentary for a single article. Returns True on success."""
     console.print(
         Panel.fit(
@@ -92,6 +131,9 @@ def _run_article(session: Session, article: Article, llm: LLMClient, bilingual: 
         if not article.content:
             _fail("No content — run `veripulse scrape enrich` first")
             return False
+        llm = _get_llm()
+        if not llm:
+            return False
         summarizer = Summarizer(llm)
         if bilingual:
             summary = asyncio.run(summarizer.summarize_bilingual(article))
@@ -107,6 +149,9 @@ def _run_article(session: Session, article: Article, llm: LLMClient, bilingual: 
     # --- Commentary ---
     _step("Generate Commentary")
     if article.status == ArticleStatus.GENERATED.value:
+        llm = _get_llm()
+        if not llm:
+            return False
         commentator = Commentator(llm)
         if filipino:
             result = asyncio.run(commentator.generate_commentary_filipino(article))
@@ -153,20 +198,22 @@ def run(
     session = get_session()
 
     try:
-        llm = LLMClient()
-        if not llm.check_connection():
-            console.print("[red]Cannot connect to Ollama.[/red]")
-            console.print(f"[dim]Expected at: {llm.base_url}  Model: {llm.model}[/dim]")
-            raise typer.Exit(1)
-
         if target:
             is_url = target.startswith("http://") or target.startswith("https://")
             if is_url:
                 article = session.query(Article).filter(Article.url == target).first()
                 if not article:
-                    console.print(f"[red]No article found with URL: {target}[/red]")
-                    console.print("[dim]Tip: run `veripulse scrape article <url> --full` first[/dim]")
-                    raise typer.Exit(1)
+                    console.print(f"[yellow]URL not in DB — scraping now...[/yellow]")
+                    scraper = NewspaperScraper()
+                    scraped = asyncio.run(scraper.scrape_article(target))
+                    if not scraped:
+                        console.print(f"[red]Failed to scrape: {target}[/red]")
+                        raise typer.Exit(1)
+                    article = save_single_article(session, scraped, full_content=True)
+                    if not article:
+                        console.print(f"[red]Could not save article — already exists or scrape failed[/red]")
+                        raise typer.Exit(1)
+                    console.print(f"[green]✓[/green] Scraped: {article.title[:70]}")
             else:
                 try:
                     article_id = int(target)
@@ -176,6 +223,7 @@ def run(
                 article = session.query(Article).filter(Article.id == article_id).first()
                 if not article:
                     console.print(f"[red]Article {article_id} not found[/red]")
+                    _article_hint(session, [ArticleStatus.RAW.value, ArticleStatus.ANALYZED.value, ArticleStatus.GENERATED.value])
                     raise typer.Exit(1)
             articles = [article]
         else:
@@ -194,12 +242,32 @@ def run(
                 .all()
             )
             if not articles:
-                console.print("[yellow]No articles pending pipeline processing[/yellow]")
+                no_content = (
+                    session.query(Article)
+                    .filter(Article.status.in_([
+                        ArticleStatus.RAW.value,
+                        ArticleStatus.ANALYZED.value,
+                        ArticleStatus.GENERATED.value,
+                    ]))
+                    .filter(
+                        (Article.content == None)
+                        | (Article.content == "")
+                        | (Article.content == "ONLY AVAILABLE IN PAID PLANS")
+                    )
+                    .count()
+                )
+                if no_content:
+                    console.print(
+                        f"[yellow]{no_content} article(s) skipped — no scraped content.[/yellow]"
+                    )
+                    console.print("[dim]Run `veripulse scrape enrich` to fetch missing content.[/dim]")
+                else:
+                    console.print("[yellow]No articles pending pipeline processing[/yellow]")
                 return
 
         ok = 0
         for article in articles:
-            if _run_article(session, article, llm, bilingual, filipino):
+            if _run_article(session, article, bilingual, filipino):
                 ok += 1
 
         if len(articles) > 1:

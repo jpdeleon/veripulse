@@ -89,27 +89,74 @@ def get_session() -> Session:
     return SessionLocal()
 
 
+def _article_hint(session: Session, statuses: list, limit: int = 10) -> None:
+    """Print a compact article table to help the user pick an ID."""
+    from rich.table import Table as RichTable
+    articles = (
+        session.query(Article)
+        .filter(Article.status.in_(statuses))
+        .order_by(Article.importance_score.desc())
+        .limit(limit)
+        .all()
+    )
+    if not articles:
+        return
+    table = RichTable(title=f"Available articles  [{', '.join(statuses)}]")
+    table.add_column("ID", style="cyan", width=4)
+    table.add_column("Title", style="white", max_width=52)
+    table.add_column("Category", style="magenta")
+    table.add_column("Score", style="green", width=6)
+    for a in articles:
+        table.add_row(
+            str(a.id),
+            a.title[:50] + "..." if len(a.title) > 50 else a.title,
+            a.category or "—",
+            f"{a.importance_score:.2f}",
+        )
+    console.print(table)
+
+
+def _next_schedule_time(session: Session, platform: str) -> datetime:
+    """Return the next available slot: 1 day after the last scheduled post on this platform,
+    or 1 day from now if nothing is scheduled yet."""
+    last = (
+        session.query(SocialPost)
+        .filter(SocialPost.platform == platform)
+        .filter(SocialPost.status == "scheduled")
+        .filter(SocialPost.scheduled_at != None)
+        .order_by(SocialPost.scheduled_at.desc())
+        .first()
+    )
+    base = last.scheduled_at if last else datetime.utcnow()
+    return base + timedelta(days=1)
+
+
 @app.command()
 def schedule(
-    article_id: int = typer.Argument(..., help="Article ID to schedule"),
-    platform: str = typer.Argument(..., help="Platform: twitter, facebook"),
-    minutes_from_now: int = typer.Option(30, "--minutes", "-m", help="Minutes from now"),
+    article_id: Optional[int] = typer.Argument(None, help="Article ID to schedule"),
+    platform: str = typer.Argument("facebook", help="Platform: twitter, facebook"),
 ):
-    """Schedule an article for posting."""
+    """Schedule an article for posting — slotted 1 day after the last scheduled post."""
     session = get_session()
+
+    if article_id is None:
+        _article_hint(session, [ArticleStatus.APPROVED.value])
+        session.close()
+        raise typer.Exit(1)
 
     try:
         article = session.query(Article).filter(Article.id == article_id).first()
 
         if not article:
             console.print(f"[red]Article {article_id} not found[/red]")
+            _article_hint(session, [ArticleStatus.APPROVED.value])
             raise typer.Exit(1)
 
         if article.status != ArticleStatus.APPROVED.value:
             console.print(f"[red]Article must be approved first[/red]")
             raise typer.Exit(1)
 
-        scheduled_at = datetime.utcnow() + timedelta(minutes=minutes_from_now)
+        scheduled_at = _next_schedule_time(session, platform)
 
         content = _get_post_content(session, article, platform)
         if not content:
@@ -136,17 +183,23 @@ def schedule(
 
 @app.command()
 def now(
-    article_id: int = typer.Argument(..., help="Article ID to post"),
-    platform: str = typer.Argument(..., help="Platform: twitter, facebook"),
+    article_id: Optional[int] = typer.Argument(None, help="Article ID to post"),
+    platform: str = typer.Argument("facebook", help="Platform: twitter, facebook"),
 ):
     """Post immediately to social media."""
     session = get_session()
+
+    if article_id is None:
+        _article_hint(session, [ArticleStatus.APPROVED.value])
+        session.close()
+        raise typer.Exit(1)
 
     try:
         article = session.query(Article).filter(Article.id == article_id).first()
 
         if not article:
             console.print(f"[red]Article {article_id} not found[/red]")
+            _article_hint(session, [ArticleStatus.APPROVED.value])
             raise typer.Exit(1)
 
         if not Confirm.ask(f"Post article '{article.title[:40]}...' to {platform}?"):

@@ -41,6 +41,34 @@ def get_session() -> Session:
     return SessionLocal()
 
 
+def _article_hint(session: Session, statuses: list, limit: int = 10) -> bool:
+    """Print a compact article table to help the user pick an ID. Returns True if any shown."""
+    from rich.table import Table as RichTable
+    articles = (
+        session.query(Article)
+        .filter(Article.status.in_(statuses))
+        .order_by(Article.importance_score.desc())
+        .limit(limit)
+        .all()
+    )
+    if not articles:
+        return False
+    table = RichTable(title=f"Available articles  [{', '.join(statuses)}]")
+    table.add_column("ID", style="cyan", width=4)
+    table.add_column("Title", style="white", max_width=52)
+    table.add_column("Category", style="magenta")
+    table.add_column("Score", style="green", width=6)
+    for a in articles:
+        table.add_row(
+            str(a.id),
+            a.title[:50] + "..." if len(a.title) > 50 else a.title,
+            a.category or "—",
+            f"{a.importance_score:.2f}",
+        )
+    console.print(table)
+    return True
+
+
 @app.command()
 def list(
     status: str = typer.Option("pending_review", "--status", "-s", help="Filter by status"),
@@ -86,16 +114,25 @@ def list(
 
 @app.command()
 def show(
-    article_id: int = typer.Argument(..., help="Article ID to review"),
+    article_id: Optional[int] = typer.Argument(None, help="Article ID to review"),
 ):
     """Show full article details for review."""
     session = get_session()
+
+    if article_id is None:
+        if not _article_hint(session, [ArticleStatus.PENDING_REVIEW.value]):
+            console.print("[yellow]No articles pending review.[/yellow]")
+            if _article_hint(session, [ArticleStatus.GENERATED.value]):
+                console.print("[dim]These need commentary — run `veripulse generate commentary --pending`[/dim]")
+        session.close()
+        raise typer.Exit(1)
 
     try:
         article = session.query(Article).filter(Article.id == article_id).first()
 
         if not article:
             console.print(f"[red]Article {article_id} not found[/red]")
+            _article_hint(session, [ArticleStatus.PENDING_REVIEW.value])
             raise typer.Exit(1)
 
         commentary = session.query(Commentary).filter(Commentary.article_id == article_id).first()
@@ -144,16 +181,25 @@ def show(
 
 @app.command()
 def approve(
-    article_id: int = typer.Argument(..., help="Article ID to approve"),
+    article_id: Optional[int] = typer.Argument(None, help="Article ID to approve"),
 ):
     """Approve an article for posting."""
     session = get_session()
+
+    if article_id is None:
+        if not _article_hint(session, [ArticleStatus.PENDING_REVIEW.value]):
+            console.print("[yellow]No articles pending review.[/yellow]")
+            if _article_hint(session, [ArticleStatus.GENERATED.value]):
+                console.print("[dim]These need commentary — run `veripulse generate commentary --pending`[/dim]")
+        session.close()
+        raise typer.Exit(1)
 
     try:
         article = session.query(Article).filter(Article.id == article_id).first()
 
         if not article:
             console.print(f"[red]Article {article_id} not found[/red]")
+            _article_hint(session, [ArticleStatus.PENDING_REVIEW.value])
             raise typer.Exit(1)
 
         if not Confirm.ask(f"Approve article '{article.title[:50]}...'?"):
@@ -171,17 +217,26 @@ def approve(
 
 @app.command()
 def reject(
-    article_id: int = typer.Argument(..., help="Article ID to reject"),
+    article_id: Optional[int] = typer.Argument(None, help="Article ID to reject"),
     reason: Optional[str] = typer.Option(None, "--reason", "-r", help="Rejection reason"),
 ):
     """Reject an article."""
     session = get_session()
+
+    if article_id is None:
+        if not _article_hint(session, [ArticleStatus.PENDING_REVIEW.value]):
+            console.print("[yellow]No articles pending review.[/yellow]")
+            if _article_hint(session, [ArticleStatus.GENERATED.value]):
+                console.print("[dim]These need commentary — run `veripulse generate commentary --pending`[/dim]")
+        session.close()
+        raise typer.Exit(1)
 
     try:
         article = session.query(Article).filter(Article.id == article_id).first()
 
         if not article:
             console.print(f"[red]Article {article_id} not found[/red]")
+            _article_hint(session, [ArticleStatus.PENDING_REVIEW.value])
             raise typer.Exit(1)
 
         if not reason:
@@ -198,17 +253,27 @@ def reject(
 
 @app.command()
 def edit(
-    article_id: int = typer.Argument(..., help="Article ID to edit"),
-    field: str = typer.Argument(..., help="Field to edit: summary, headline, commentary"),
+    article_id: Optional[int] = typer.Argument(None, help="Article ID to edit"),
+    field: Optional[str] = typer.Argument(None, help="Field to edit: summary, headline, commentary"),
 ):
     """Edit article field before posting."""
     session = get_session()
+
+    if article_id is None:
+        _article_hint(session, [ArticleStatus.PENDING_REVIEW.value, ArticleStatus.APPROVED.value])
+        session.close()
+        raise typer.Exit(1)
 
     try:
         article = session.query(Article).filter(Article.id == article_id).first()
 
         if not article:
             console.print(f"[red]Article {article_id} not found[/red]")
+            _article_hint(session, [ArticleStatus.PENDING_REVIEW.value, ArticleStatus.APPROVED.value])
+            raise typer.Exit(1)
+
+        if field is None:
+            console.print("[yellow]Provide a field: summary, headline, commentary[/yellow]")
             raise typer.Exit(1)
 
         new_value = Prompt.ask(f"New {field}")

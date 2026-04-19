@@ -1,7 +1,7 @@
 """DB command - manage database entries."""
 
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
 import typer
 from rich.console import Console
@@ -46,8 +46,8 @@ def get_session() -> Session:
 
 @app.command()
 def delete(
-    id: Optional[int] = typer.Option(None, "--id", help="Delete article by ID"),
-    status: Optional[str] = typer.Option(None, "--status", help="Delete articles with this status (raw, rejected, ...)"),
+    ids: Optional[List[int]] = typer.Option(None, "--id", help="Delete article by ID (repeatable: --id 1 --id 2)"),
+    status: Optional[str] = typer.Option(None, "--status", help=f"Delete articles with this status: {', '.join(s.value for s in ArticleStatus)}"),
     source: Optional[str] = typer.Option(None, "--source", help="Delete articles from this source name (partial match)"),
     before: Optional[str] = typer.Option(None, "--before", help="Delete articles published before date (YYYY-MM-DD)"),
     no_content: bool = typer.Option(False, "--no-content", help="Delete articles with no usable content"),
@@ -67,17 +67,40 @@ def delete(
       veripulse db delete --before 2024-01-01 --dry-run
       veripulse db delete --status raw --no-content -y
     """
-    if not any([id is not None, status, source, before, no_content]):
-        console.print("[red]Provide at least one filter. See --help for options.[/red]")
-        raise typer.Exit(1)
-
     session = get_session()
+
+    if not any([ids, status, source, before, no_content]):
+        valid_statuses = ", ".join(s.value for s in ArticleStatus)
+        console.print(f"[yellow]Provide at least one filter. See --help.[/yellow]")
+        console.print(f"[dim]Valid --status values: {valid_statuses}[/dim]\n")
+        articles = (
+            session.query(Article)
+            .order_by(Article.status, Article.importance_score.desc())
+            .limit(20)
+            .all()
+        )
+        if articles:
+            hint = Table(title="All articles (pick an ID to delete)")
+            hint.add_column("ID", style="cyan", width=4)
+            hint.add_column("Status", style="yellow", width=14)
+            hint.add_column("Title", style="white", max_width=50)
+            hint.add_column("Score", style="green", width=6)
+            for a in articles:
+                hint.add_row(
+                    str(a.id),
+                    a.status,
+                    a.title[:48] + "..." if len(a.title) > 48 else a.title,
+                    f"{a.importance_score:.2f}",
+                )
+            console.print(hint)
+        session.close()
+        raise typer.Exit(1)
 
     try:
         query = session.query(Article)
 
-        if id is not None:
-            query = query.filter(Article.id == id)
+        if ids:
+            query = query.filter(Article.id.in_(ids))
 
         if status:
             valid = {s.value for s in ArticleStatus}
